@@ -1,41 +1,20 @@
 {
   "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "tag": "splithttp-in",
-      "port": 10000,
-      "listen": "127.0.0.1",
-      "protocol": "vmess",
-      "settings": {
-        "clients": [
-          {
-            "id": "PASTE_YOUR_UUID_HERE",
-            "alterId": 0
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "splithttp",
-        "splithttpSettings": {
-          "path": "/mhr"
-        }
-      }
+  "inbounds": [{
+    "tag": "splithttp-in",
+    "port": 10000,
+    "listen": "127.0.0.1",
+    "protocol": "vmess",
+    "settings": {
+      "clients": [{
+        "id": "4d236123-ef34-439a-b654-fc58927d93b3",
+        "alterId": 0
+      }]
+    },
+    "streamSettings": {
+      "network": "splithttp",
+      "splithttpSettings": { "path": "/mhr" }
     }
-  ],
-  "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom",
-      "settings": {}
-    }
-  ],
-  "routing": {
-    "rules": [
-      {
-        "type": "field",
-        "network": "tcp,udp",
-        "outboundTag": "direct"
-      }
-    ]
-  }
+  }],
+  "outbounds": [{ "protocol": "freedom" }]
 }

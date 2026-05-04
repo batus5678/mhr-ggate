@@ -187,6 +187,7 @@ mhr-ggate/
 
 ## کردیت‌ها
 
+- [Vuk](https://github.com/Vuks1n) — ایده 
 - [mhr-cfw](https://github.com/denuitt1/mhr-cfw) — ایده اصلی GAS به CF Workers
 - [XTLS/Xray-core](https://github.com/XTLS/Xray-core) — تونل اصلی
 

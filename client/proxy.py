@@ -1,234 +1,159 @@
 """
-mhr-ggate | Local Proxy
-------------------------
-Sits on localhost, accepts SOCKS5 + HTTP proxy connections,
-tunnels everything through domain fronting → GAS → your VPS → xray.
+mhr-ggate | Local MITM Proxy
+------------------------------
+Sits on localhost, accepts HTTP/HTTPS proxy connections.
+For HTTPS: terminates TLS with a fake cert, reads plain HTTP,
+           forwards through domain fronting → GAS → VPS → internet.
+For HTTP:  forwards directly through domain fronting.
 
 Usage:
-    python3 client/proxy.py -c config.json
+    python proxy.py -c ../config.json
+
+First run generates a CA cert — install it in your browser or you'll get SSL errors.
 """
 
 import asyncio
-import base64
 import json
 import logging
-import os
+import ssl
 import sys
 import argparse
+import urllib.parse
 
+from certs import ensure_ca, make_ssl_context, CA_CERT
 from fronting import DomainFrontClient
 
 log = logging.getLogger("Proxy")
 
 
-# ─── SOCKS5 constants ─────────────────────────────────────────────────
-SOCKS5_VERSION  = 0x05
-SOCKS5_NOAUTH   = 0x00
-SOCKS5_CONNECT  = 0x01
-SOCKS5_IPV4     = 0x01
-SOCKS5_DOMAIN   = 0x03
-SOCKS5_IPV6     = 0x04
-SOCKS5_SUCCESS  = 0x00
-
-
-class ProxyServer:
+class MITMProxy:
     def __init__(self, config: dict):
-        self.config      = config
-        self.host        = config.get("listen_host", "127.0.0.1")
-        self.http_port   = config.get("listen_port", 8085)
-        self.socks5_port = config.get("socks5_port", 1080)
-        self.fronter     = DomainFrontClient(config)
+        self.config  = config
+        self.host    = config.get("listen_host", "127.0.0.1")
+        self.port    = config.get("listen_port", 8085)
+        self.fronter = DomainFrontClient(config)
 
-    # ──────────────────────────────────────────────────────────────────
-    # Domain fronting relay
-    # ──────────────────────────────────────────────────────────────────
+    async def _forward(self, data: bytes, host: str, port: int) -> bytes:
+        target_path = f"/{host}/{port}"
+        loop = asyncio.get_event_loop()
+        status, body = await loop.run_in_executor(
+            None, self.fronter.post, data, target_path
+        )
+        if status == 0:
+            log.warning("Relay failed for %s:%d", host, port)
+        return body
 
-    async def _relay_through_front(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-        target_host: str,
-        target_port: int,
-    ):
-        """
-        Relay a TCP stream through domain fronting → GAS → VPS → xray.
-        Reads chunks from the client, POSTs them via domain fronting,
-        and writes responses back.
-        """
-        target_path = f"/{target_host}/{target_port}"
-        log.info("Relaying %s:%d via domain fronting", target_host, target_port)
+    async def _relay_https(self, reader, writer, host, port):
+        """MITM: terminate TLS, relay decrypted HTTP through domain fronting."""
+        writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        await writer.drain()
 
+        raw_sock = writer.transport.get_extra_info("socket")
+        if raw_sock is None:
+            writer.close()
+            return
+
+        try:
+            ssl_ctx = make_ssl_context(host)
+            loop = asyncio.get_event_loop()
+
+            tls_reader = asyncio.StreamReader()
+            proto = asyncio.StreamReaderProtocol(tls_reader)
+
+            transport, _ = await loop.create_connection(
+                lambda: proto,
+                sock=raw_sock,
+                ssl=ssl_ctx,
+                server_side=True,
+            )
+            tls_writer = asyncio.StreamWriter(transport, proto, tls_reader, loop)
+        except Exception as e:
+            log.debug("TLS handshake failed %s: %s", host, e)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            return
+
+        log.info("[MITM] decrypted %s:%d", host, port)
         try:
             while True:
                 try:
-                    data = await asyncio.wait_for(reader.read(65536), timeout=30)
+                    data = await asyncio.wait_for(tls_reader.read(65536), timeout=30)
                 except asyncio.TimeoutError:
                     break
                 if not data:
                     break
-
-                # POST through domain fronting
-                loop = asyncio.get_event_loop()
-                status, body = await loop.run_in_executor(
-                    None, self.fronter.post, data, target_path
-                )
-
-                if status == 0:
-                    log.warning("Domain fronting relay failed for %s:%d", target_host, target_port)
-                    break
-
-                if body:
-                    writer.write(body)
-                    await writer.drain()
-
-        except (ConnectionResetError, BrokenPipeError):
+                response = await self._forward(data, host, port)
+                if response:
+                    tls_writer.write(response)
+                    await tls_writer.drain()
+        except (ConnectionResetError, BrokenPipeError, ssl.SSLError):
             pass
         finally:
-            writer.close()
-
-    # ──────────────────────────────────────────────────────────────────
-    # SOCKS5
-    # ──────────────────────────────────────────────────────────────────
-
-    async def _handle_socks5(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        try:
-            # Greeting
-            header = await reader.readexactly(2)
-            n_methods = header[1]
-            await reader.readexactly(n_methods)
-            writer.write(bytes([SOCKS5_VERSION, SOCKS5_NOAUTH]))
-            await writer.drain()
-
-            # Request
-            req = await reader.readexactly(4)
-            cmd, atyp = req[1], req[3]
-
-            if cmd != SOCKS5_CONNECT:
-                writer.write(bytes([SOCKS5_VERSION, 0x07, 0x00, 0x01, 0,0,0,0, 0,0]))
-                writer.close()
-                return
-
-            if atyp == SOCKS5_IPV4:
-                addr_bytes = await reader.readexactly(4)
-                host = ".".join(str(b) for b in addr_bytes)
-            elif atyp == SOCKS5_DOMAIN:
-                length = (await reader.readexactly(1))[0]
-                host = (await reader.readexactly(length)).decode()
-            elif atyp == SOCKS5_IPV6:
-                addr_bytes = await reader.readexactly(16)
-                import socket
-                host = socket.inet_ntop(socket.AF_INET6, addr_bytes)
-            else:
-                writer.close()
-                return
-
-            port_bytes = await reader.readexactly(2)
-            port = int.from_bytes(port_bytes, "big")
-
-            # Reply success
-            writer.write(bytes([SOCKS5_VERSION, SOCKS5_SUCCESS, 0x00, 0x01, 0,0,0,0, 0,0]))
-            await writer.drain()
-
-            log.info("[SOCKS5] CONNECT %s:%d", host, port)
-            await self._relay_through_front(reader, writer, host, port)
-
-        except Exception as e:
-            log.debug("SOCKS5 handler error: %s", e)
             try:
-                writer.close()
+                tls_writer.close()
             except Exception:
                 pass
 
-    # ──────────────────────────────────────────────────────────────────
-    # HTTP proxy (CONNECT method)
-    # ──────────────────────────────────────────────────────────────────
-
-    async def _handle_http(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
-            first_line = await reader.readline()
+            first_line = await asyncio.wait_for(reader.readline(), timeout=15)
+            if not first_line:
+                writer.close()
+                return
+
             line = first_line.decode(errors="replace").strip()
-            parts = line.split(" ")
-
-            if parts[0].upper() == "CONNECT":
-                # HTTPS tunneling
-                host_port = parts[1]
-                host, port_str = host_port.rsplit(":", 1)
-                port = int(port_str)
-
-                writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-                await writer.drain()
-
-                log.info("[HTTP] CONNECT %s:%d", host, port)
-                await self._relay_through_front(reader, writer, host, port)
-
-            else:
-                # Plain HTTP request — relay as-is
-                if len(parts) >= 2:
-                    import urllib.parse
-                    parsed = urllib.parse.urlparse(parts[1])
-                    host = parsed.hostname or ""
-                    port = parsed.port or 80
-                    rest = await reader.read(65536)
-                    full_request = first_line + rest
-
-                    log.info("[HTTP] %s %s:%d", parts[0], host, port)
-                    await self._relay_through_front(
-                        asyncio.StreamReader(), writer, host, port
-                    )
-                writer.close()
-
-        except Exception as e:
-            log.debug("HTTP handler error: %s", e)
-            try:
-                writer.close()
-            except Exception:
-                pass
-
-    # ──────────────────────────────────────────────────────────────────
-    # Detect protocol and dispatch
-    # ──────────────────────────────────────────────────────────────────
-
-    async def _dispatch(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        try:
-            first_byte = await reader.read(1)
-            if not first_byte:
+            parts = line.split()
+            if len(parts) < 2:
                 writer.close()
                 return
 
-            # Peek at first byte to detect protocol
-            reader._buffer = bytearray(first_byte) + reader._buffer  # type: ignore
+            method, target = parts[0].upper(), parts[1]
 
-            if first_byte == b"\x05":
-                await self._handle_socks5(reader, writer)
+            # drain remaining headers
+            while True:
+                hdr = await reader.readline()
+                if hdr in (b"\r\n", b"\n", b""):
+                    break
+
+            if method == "CONNECT":
+                host, _, port_str = target.rpartition(":")
+                port = int(port_str) if port_str.isdigit() else 443
+                log.info("[HTTPS] %s:%d", host, port)
+                await self._relay_https(reader, writer, host, port)
             else:
-                await self._handle_http(reader, writer)
+                parsed = urllib.parse.urlparse(target)
+                host = parsed.hostname or target
+                port = parsed.port or 80
+                path = parsed.path or "/"
+                if parsed.query:
+                    path += "?" + parsed.query
+                req = f"{method} {path} HTTP/1.1\r\n\r\n".encode()
+                log.info("[HTTP] %s %s:%d", method, host, port)
+                response = await self._forward(req, host, port)
+                if response:
+                    writer.write(response)
+                    await writer.drain()
+
         except Exception as e:
-            log.debug("Dispatch error: %s", e)
+            log.debug("Handler error: %s", e)
+        finally:
             try:
                 writer.close()
             except Exception:
                 pass
-
-    # ──────────────────────────────────────────────────────────────────
-    # Start
-    # ──────────────────────────────────────────────────────────────────
 
     async def start(self):
-        server = await asyncio.start_server(
-            self._dispatch, self.host, self.socks5_port
-        )
-        log.info("mhr-ggate proxy listening on %s:%d", self.host, self.socks5_port)
-        log.info("Domain fronting: IP=%s  SNI=%s  Host=script.google.com",
-                 self.config.get("google_ip"), self.config.get("front_domain"))
+        server = await asyncio.start_server(self.handle, self.host, self.port)
+        log.info("Proxy listening on %s:%d", self.host, self.port)
         async with server:
             await server.serve_forever()
 
 
-# ──────────────────────────────────────────────────────────────────────
-
 def main():
-    parser = argparse.ArgumentParser(description="mhr-ggate local proxy")
-    parser.add_argument("-c", "--config", default="config.json")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--config", default="../config.json")
     parser.add_argument("--log-level", default=None)
     args = parser.parse_args()
 
@@ -237,7 +162,6 @@ def main():
             config = json.load(f)
     except FileNotFoundError:
         print(f"Config not found: {args.config}")
-        print("Copy config.example.json to config.json and fill in your values.")
         sys.exit(1)
 
     level = args.log_level or config.get("log_level", "INFO")
@@ -247,17 +171,25 @@ def main():
         datefmt="%H:%M:%S",
     )
 
-    print("=" * 50)
-    print("  mhr-ggate | Domain Fronting Proxy")
-    print("=" * 50)
-    print(f"  Fronting IP  : {config.get('google_ip')}")
-    print(f"  SNI (DPI sees): {config.get('front_domain')}")
-    print(f"  Real host    : script.google.com (inside TLS)")
-    print(f"  SOCKS5       : {config.get('listen_host')}:{config.get('socks5_port', 1080)}")
-    print("=" * 50)
+    ensure_ca()
+
+    print("=" * 60)
+    print("  mhr-ggate | MITM Proxy")
+    print("=" * 60)
+    print(f"  Proxy      : {config.get('listen_host')}:{config.get('listen_port', 8085)}")
+    print(f"  SNI        : {config.get('front_domain')} (what DPI sees)")
+    print(f"  Real host  : script.google.com (inside TLS, hidden)")
+    print()
+    print(f"  ⚠  Install the CA cert or HTTPS won't work:")
+    print(f"     {CA_CERT.resolve()}")
+    print(f"     Chrome/Edge : Settings → Privacy → Manage Certs")
+    print(f"                   → Trusted Root CAs → Import")
+    print(f"     Firefox     : Settings → Privacy → View Certs")
+    print(f"                   → Authorities → Import")
+    print("=" * 60)
 
     try:
-        asyncio.run(ProxyServer(config).start())
+        asyncio.run(MITMProxy(config).start())
     except KeyboardInterrupt:
         print("\nStopped.")
 

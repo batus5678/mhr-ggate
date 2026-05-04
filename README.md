@@ -184,6 +184,7 @@ mhr-ggate/
 
 ## credits
 
+- [Vuk](https://github.com/Vuks1n) — ideas
 - [mhr-cfw](https://github.com/denuitt1/mhr-cfw) — original GAS → CF Workers idea
 - [XTLS/Xray-core](https://github.com/XTLS/Xray-core) — the actual tunnel
 

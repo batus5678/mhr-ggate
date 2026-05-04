@@ -1,5 +1,7 @@
 # mhr-ggate
 
+> 🇮🇷 [نسخه فارسی](README.fa.md)
+
 routes traffic through Google Apps Script → your own VPS instead of Cloudflare Workers. based on [mhr-cfw](https://github.com/denuitt1/mhr-cfw) but with a real xray tunnel underneath so UDP and gaming actually work.
 
 ```

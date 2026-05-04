@@ -10,6 +10,15 @@ you → script.google.com → your VPS → internet
 
 GAS runs on Google's domain so it basically never gets blocked. your VPS stays hidden, nobody connects to it directly.
 
+## ⚠️ Purpose & Warning
+
+**This project is for educational purposes and legitimate circumvention of internet censorship.**
+
+- Use responsibly and in accordance with applicable laws.
+- Google Apps Script has daily quotas. Abuse may lead to your Google account being limited or banned.
+- The author is not responsible for any misuse or consequences of using this tool.
+
+
 ---
 
 ## what's different from mhr-cfw
@@ -40,6 +49,20 @@ mhr-ggate puts xray on your VPS with VMess + SplitHTTP transport. GAS forwards t
 ---
 
 ## setup
+
+### Quick Start (New Python Client)
+
+```bash
+git clone https://github.com/Vuks1n/mhr-ggate.git
+cd mhr-ggate
+
+cp client/config.example.json client/config.json
+# Edit client/config.json with your script_id and auth_key
+```
+```Bash
+python3 client/proxy.py -c client/config.json
+```
+→ SOCKS5 proxy will run on 127.0.0.1:1080
 
 ### 1. clone
 

@@ -185,6 +185,10 @@ UDP works because xray's xudp mux wraps UDP datagrams inside the VMess tunnel.
 
 ```
 mhr-ggate/
+├── client/
+│   ├── fronting.py          # Domain fronting logic (the brain)
+│   ├── proxy.py             # Local SOCKS5 proxy
+│   └── config.example.json  # ← Configuration template
 ├── gas/
 │   └── Code.gs              # paste into Google Apps Script
 ├── server/

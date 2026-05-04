@@ -1,90 +1,123 @@
 #!/usr/bin/env python3
 """
-mhr-gvps | VPS Relay Server
-Receives forwarded requests from GAS and proxies them to the local v2ray instance.
-Run this on your VPS alongside v2ray/xray.
+mhr-ggate | VPS Relay Server
+Runs on your VPS. Receives requests from GAS (via domain fronting)
+and forwards them to the local xray instance.
 
-Requirements: pip install fastapi uvicorn httpx --break-system-packages
+  GAS → this server (port 8080, behind nginx) → xray (port 10000, localhost only)
+
+Requirements:
+    pip install fastapi uvicorn httpx --break-system-packages
 """
 
 import base64
 import os
 import httpx
 import uvicorn
-from fastapi import FastAPI, Request, Response, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import PlainTextResponse, JSONResponse
 
-# ─── CONFIG ───────────────────────────────────────────────
-SECRET       = os.environ.get("MHR_SECRET", "CHANGE_THIS_SECRET_KEY")
-V2RAY_PORT   = int(os.environ.get("V2RAY_PORT", "10000"))   # local v2ray SplitHTTP port
-LISTEN_PORT  = int(os.environ.get("LISTEN_PORT", "8080"))   # this server's port (put behind nginx+TLS)
-# ──────────────────────────────────────────────────────────
+# ─── CONFIG ────────────────────────────────────────────────────────────────────
+# Set these as environment variables or edit the defaults below
+SECRET      = os.environ.get("MHR_SECRET",    "CHANGE_THIS_SECRET_KEY")
+XRAY_PORT   = int(os.environ.get("XRAY_PORT", "10000"))   # xray SplitHTTP port (localhost)
+XRAY_PATH   = os.environ.get("XRAY_PATH",     "/mhr")     # must match xray_server.json
+LISTEN_PORT = int(os.environ.get("LISTEN_PORT","8080"))    # this server listens here (nginx proxies it)
+# ───────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(docs_url=None, redoc_url=None)
-v2ray_base = f"http://127.0.0.1:{V2RAY_PORT}"
+xray_base = f"http://127.0.0.1:{XRAY_PORT}"
 
 
-def check_secret(request: Request):
-    secret = request.headers.get("X-MHR-Secret", "")
-    if secret != SECRET:
+def verify_secret(request: Request):
+    """Reject requests that don't carry the correct secret header."""
+    incoming = request.headers.get("X-MHR-Secret", "")
+    if incoming != SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
+def decode_body(raw: bytes) -> bytes:
+    """GAS encodes binary bodies as base64 — decode if needed."""
+    try:
+        return base64.b64decode(raw)
+    except Exception:
+        return raw  # already raw bytes
+
+
+def clean_headers(request: Request) -> dict:
+    """Strip hop-by-hop and mhr-specific headers before forwarding to xray."""
+    skip = {
+        "host", "x-mhr-secret", "x-mhr-path",
+        "content-length", "transfer-encoding", "connection",
+    }
+    return {k: v for k, v in request.headers.items() if k.lower() not in skip}
+
+
+# ── Health check (must be defined BEFORE the catch-all route) ─────────────────
+@app.get("/health")
+async def health():
+    return JSONResponse({"status": "ok", "xray": f"127.0.0.1:{XRAY_PORT}{XRAY_PATH}"})
+
+
+# ── Main relay routes ──────────────────────────────────────────────────────────
 @app.post("/{path:path}")
 async def relay_post(path: str, request: Request):
-    check_secret(request)
-    fwd_path = request.headers.get("X-MHR-Path", f"/{path}")
-    body     = await request.body()
+    verify_secret(request)
 
-    # Decode base64 if GAS encoded it (GAS sends base64 for binary safety)
+    body = decode_body(await request.body())
+    headers = clean_headers(request)
+    headers["Host"] = f"127.0.0.1:{XRAY_PORT}"
+
+    target = xray_base + XRAY_PATH
+
     try:
-        body = base64.b64decode(body)
-    except Exception:
-        pass  # not base64, use raw
-
-    headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "x-mhr-secret", "x-mhr-path",
-                             "content-length", "transfer-encoding")
-    }
-    headers["Host"] = f"127.0.0.1:{V2RAY_PORT}"
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{v2ray_base}{fwd_path}",
-            content=body,
-            headers=headers,
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(target, content=body, headers=headers)
+    except httpx.ConnectError:
+        # xray is not running or wrong port
+        return PlainTextResponse(
+            "xray not reachable — is xray running on port {}?".format(XRAY_PORT),
+            status_code=502
         )
-        encoded = base64.b64encode(resp.content).decode()
-        return PlainTextResponse(content=encoded, status_code=resp.status_code)
+
+    encoded = base64.b64encode(resp.content).decode()
+    return PlainTextResponse(content=encoded, status_code=resp.status_code)
 
 
 @app.get("/{path:path}")
 async def relay_get(path: str, request: Request):
-    check_secret(request)
-    fwd_path = request.headers.get("X-MHR-Path", f"/{path}")
+    verify_secret(request)
 
-    headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "x-mhr-secret", "x-mhr-path")
-    }
-    headers["Host"] = f"127.0.0.1:{V2RAY_PORT}"
+    headers = clean_headers(request)
+    headers["Host"] = f"127.0.0.1:{XRAY_PORT}"
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.get(
-            f"{v2ray_base}{fwd_path}",
-            headers=headers,
+    target = xray_base + XRAY_PATH
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(target, headers=headers)
+    except httpx.ConnectError:
+        return PlainTextResponse(
+            "xray not reachable — is xray running on port {}?".format(XRAY_PORT),
+            status_code=502
         )
-        encoded = base64.b64encode(resp.content).decode()
-        return PlainTextResponse(content=encoded, status_code=resp.status_code)
+
+    encoded = base64.b64encode(resp.content).decode()
+    return PlainTextResponse(content=encoded, status_code=resp.status_code)
 
 
-@app.get("/")
-async def health():
-    return PlainTextResponse("ok")
+# ── Startup banner ─────────────────────────────────────────────────────────────
+@app.on_event("startup")
+async def banner():
+    print("=" * 55)
+    print("  mhr-ggate | VPS Relay Server")
+    print("=" * 55)
+    print(f"  Listening on  : 0.0.0.0:{LISTEN_PORT}")
+    print(f"  Forwarding to : 127.0.0.1:{XRAY_PORT}{XRAY_PATH}")
+    print(f"  Secret key    : {'*' * len(SECRET)}")
+    print(f"  Health check  : http://localhost:{LISTEN_PORT}/health")
+    print("=" * 55)
 
 
 if __name__ == "__main__":
-    print(f"[*] mhr-gvps server starting on 0.0.0.0:{LISTEN_PORT}")
-    print(f"[*] Bridging GAS → this server → v2ray on port {V2RAY_PORT}")
     uvicorn.run(app, host="0.0.0.0", port=LISTEN_PORT)

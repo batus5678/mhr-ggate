@@ -43,7 +43,7 @@ mhr-ggate puts xray on your VPS with VMess + SplitHTTP transport. GAS forwards t
 
 ```bash
 git clone https://github.com/Vuks1n/mhr-ggate
-cd mhr-ghost
+cd mhr-ggate
 ```
 
 ### 2. install xray on your VPS
@@ -159,7 +159,7 @@ UDP works because xray's xudp mux wraps UDP datagrams inside the VMess tunnel.
 ## files
 
 ```
-mhr-ghost/
+mhr-ggate/
 ├── gas/
 │   └── Code.gs              # paste into Google Apps Script
 ├── server/

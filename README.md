@@ -2,113 +2,119 @@
 
 > 🇮🇷 [نسخه فارسی](README.fa.md)
 
-routes traffic through Google Apps Script → your own VPS instead of Cloudflare Workers. based on [mhr-cfw](https://github.com/denuitt1/mhr-cfw) but with a real xray tunnel underneath so UDP and gaming actually work.
+> **Purpose:** open source research tool for studying encrypted transport protocols and censorship circumvention techniques. intended for personal, educational, and research use only. use in accordance with the laws of your country.
+
+routes traffic through domain fronting → GAS → your VPS → xray. gaming and UDP supported.
 
 ```
-you → script.google.com → your VPS → internet
+your device
+  └─► Google CDN IP (DPI sees: www.google.com ✔)
+        └─► script.google.com (hidden inside TLS)
+              └─► GAS relay
+                    └─► your VPS
+                          └─► xray (VMess + SplitHTTP)
+                                └─► internet / game servers
 ```
 
-GAS runs on Google's domain so it basically never gets blocked. your VPS stays hidden, nobody connects to it directly.
-
-## ⚠️ Purpose & Warning
-
-**This project is for educational purposes and legitimate circumvention of internet censorship.**
-
-- Use responsibly and in accordance with applicable laws.
-- Google Apps Script has daily quotas. Abuse may lead to your Google account being limited or banned.
-- The author is not responsible for any misuse or consequences of using this tool.
-
+> **why script.google.com being blocked doesn't matter:**
+> the client never directly connects to script.google.com.
+> it connects to a Google CDN IP with SNI `www.google.com` — which IS accessible.
+> the real `Host: script.google.com` header lives inside the encrypted TLS tunnel, invisible to DPI.
+> this is domain fronting.
 
 ---
 
-## what's different from mhr-cfw
+## what runs where
 
-mhr-cfw uses Cloudflare Workers as the backend and just HTTP-proxies raw traffic. that's why games don't work and most apps break — there's no real tunnel.
-
-mhr-ggate puts xray on your VPS with VMess + SplitHTTP transport. GAS forwards to the relay server, relay bridges into xray. full tunnel, UDP included.
-
-| | mhr-cfw | mhr-ggate |
+| component | runs on | file |
 |---|---|---|
-| frontend | GAS | GAS |
-| backend | Cloudflare Workers | your VPS |
-| gaming / UDP | ✖ | ✔ |
-| protocol | raw HTTP proxy | VMess + SplitHTTP |
-| backend cost | free | ~$3-5/mo VPS |
-| you control backend | ✖ | ✔ |
+| domain fronting proxy | **your device** | `client/proxy.py` |
+| GAS relay | **Google's servers** (free) | `gas/Code.gs` |
+| relay bridge | **your VPS** | `server/server.py` |
+| xray tunnel | **your VPS** | `server/xray_server.json` |
 
 ---
 
 ## requirements
 
-- a VPS outside Iran (any provider)
-- a Google account (free)
-- [xray-core](https://github.com/XTLS/Xray-core) on the VPS
-- Python 3.10+ on the VPS
-- v2rayN / NekoBox / Hiddify on your device
+| where | what |
+|---|---|
+| your device | Python 3.10+ |
+| your VPS | Python 3.10+, xray-core, nginx |
+| Google | a Google account (free) |
+| client app | v2rayN / NekoBox / Hiddify (optional, for vmess:// link) |
 
 ---
 
 ## setup
 
-### Quick Start (New Python Client)
+### step 1 — VPS: install xray
 
-```bash
-git clone https://github.com/Vuks1n/mhr-ggate.git
-cd mhr-ggate
-
-cp client/config.example.json client/config.json
-# Edit client/config.json with your script_id and auth_key
-```
-```Bash
-python3 client/proxy.py -c client/config.json
-```
-→ SOCKS5 proxy will run on 127.0.0.1:1080
-
-### 1. clone
-
-```bash
-git clone https://github.com/Vuks1n/mhr-ggate
-cd mhr-ggate
-```
-
-### 2. install xray on your VPS
+ssh into your VPS and run:
 
 ```bash
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 ```
 
-generate a UUID and save it:
+generate a UUID — save it, you'll need it in every config:
 
 ```bash
 xray uuid
+# example output: 550e8400-e29b-41d4-a716-446655440000
 ```
 
-### 3. configure xray server
+---
 
-edit `server/xray_server.json` and paste your UUID:
+### step 2 — VPS: configure and run xray
+
+edit `server/xray_server.json` — paste your UUID:
 
 ```json
-"id": "YOUR-UUID-HERE"
+"id": "550e8400-e29b-41d4-a716-446655440000"
 ```
 
-run it:
+copy the file to your VPS and run xray:
 
 ```bash
-xray run -config server/xray_server.json
+xray run -config /path/to/server/xray_server.json
 ```
 
-xray listens on `127.0.0.1:10000` — not exposed to the internet.
+xray will listen on `127.0.0.1:10000` — **localhost only, not exposed to the internet**.
 
-### 4. run the relay server
+to verify xray is running:
+```bash
+curl http://127.0.0.1:10000/mhr
+# should return something (even an error), not "connection refused"
+```
+
+---
+
+### step 3 — VPS: run the relay server
 
 ```bash
-pip install fastapi uvicorn httpx
+pip install fastapi uvicorn httpx --break-system-packages
 
-export MHR_SECRET="pick_a_secret_key"
+export MHR_SECRET="pick_any_secret_key_here"
+export XRAY_PORT=10000
+export XRAY_PATH=/mhr
+
 python3 server/server.py
+# starts on 0.0.0.0:8080
 ```
 
-put it behind nginx + TLS on port 443:
+test it locally on the VPS:
+```bash
+curl http://localhost:8080/health
+# should return: {"status":"ok","xray":"127.0.0.1:10000/mhr"}
+```
+
+if you get 502 it means xray isn't running. go back to step 2.
+
+---
+
+### step 4 — VPS: put server behind nginx + TLS
+
+install nginx and certbot, then create `/etc/nginx/sites-available/mhr-ggate`:
 
 ```nginx
 server {
@@ -119,65 +125,136 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
+        proxy_pass         http://127.0.0.1:8080;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
     }
 }
 ```
 
-no domain? a self-signed cert + raw IP works too.
-
-### 5. deploy the GAS relay
-
-1. go to [script.google.com](https://script.google.com) → New Project
-2. paste `gas/Code.gs`
-3. edit the top of the file:
-```js
-var VPS_URL = "https://yourdomain.com";
-var SECRET  = "pick_a_secret_key";      // same as step 4
-```
-4. Deploy → New Deployment → Web App
-   - Execute as: **Me**
-   - Who has access: **Anyone**
-5. copy the deployment URL:
-```
-https://script.google.com/macros/s/XXXXXXXXXX/exec
-```
-
-### 6. generate your client config
-
 ```bash
-python3 v2ray/generate_config.py \
-  --gas-url "https://script.google.com/macros/s/XXXXXXXXXX/exec" \
-  --uuid    "YOUR-UUID-HERE"
+ln -s /etc/nginx/sites-available/mhr-ggate /etc/nginx/sites-enabled/
+certbot --nginx -d yourdomain.com
+nginx -t && systemctl reload nginx
 ```
 
-outputs `client_config.json` and a `vmess://` link you can paste into any v2ray client.
+no domain? a self-signed cert + raw IP works too:
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes
+```
+then update nginx to use `cert.pem` and `key.pem`.
 
 ---
 
-## connecting
+### step 5 — Google: deploy the GAS relay
 
-```bash
-# option A — xray CLI
-xray run -config v2ray/client_config.json
-
-# option B — paste the vmess:// link into v2rayN, NekoBox, or Hiddify
+1. go to [script.google.com](https://script.google.com) → **New project**
+2. delete all default code, paste the contents of `gas/Code.gs`
+3. edit the top two lines:
+```js
+var VPS_URL = "https://yourdomain.com";    // your VPS URL from step 4
+var SECRET  = "pick_any_secret_key_here";  // same key as step 3
+```
+4. click **Deploy → New deployment**
+   - type: **Web app**
+   - execute as: **Me**
+   - who has access: **Anyone**
+5. click **Deploy**, copy the deployment URL:
+```
+https://script.google.com/macros/s/AKfycb.../exec
 ```
 
-local proxies after connecting:
-- SOCKS5 `127.0.0.1:1080`
-- HTTP `127.0.0.1:8118`
+---
+
+### step 6 — your device: set up config
+
+```bash
+cp config.example.json config.json
+```
+
+edit `config.json`:
+```json
+{
+  "google_ip":    "216.239.38.120",
+  "front_domain": "www.google.com",
+  "script_id":    "AKfycb...",
+  "auth_key":     "pick_any_secret_key_here",
+  "listen_host":  "127.0.0.1",
+  "socks5_port":  1080,
+  "log_level":    "INFO"
+}
+```
+
+- `google_ip` — a Google CDN IP. default works. you can also use the whitelisted Akamai IPs.
+- `front_domain` — what DPI sees as SNI. leave as `www.google.com`.
+- `script_id` — the long ID from your GAS deployment URL (the part between `/s/` and `/exec`)
+- `auth_key` — same secret key from steps 3 and 5
+
+---
+
+### step 7 — your device: run the proxy
+
+```bash
+cd client
+python3 proxy.py -c ../config.json
+```
+
+you should see:
+```
+  mhr-ggate | Domain Fronting Proxy
+  Fronting IP   : 216.239.38.120
+  SNI (DPI sees): www.google.com
+  Real host     : script.google.com (inside TLS)
+  SOCKS5        : 127.0.0.1:1080
+```
+
+set your browser or system proxy to **SOCKS5 `127.0.0.1:1080`**.
+
+---
+
+### optional — generate vmess:// config for v2rayN / Hiddify
+
+```bash
+python3 v2ray/generate_config.py \
+  --gas-url "https://script.google.com/macros/s/AKfycb.../exec" \
+  --uuid    "550e8400-e29b-41d4-a716-446655440000"
+```
+
+outputs a `vmess://` link — paste it into v2rayN, NekoBox, or Hiddify.
 
 ---
 
 ## gaming
 
-set your game client or launcher to use SOCKS5 `127.0.0.1:1080`.
+set your game launcher to SOCKS5 `127.0.0.1:1080`.
 
-on Windows you can use [Proxifier](https://www.proxifier.com/) to route any game through it without the game needing built-in proxy support.
+on Windows use [Proxifier](https://www.proxifier.com/) to route any game automatically.
 
-UDP works because xray's xudp mux wraps UDP datagrams inside the VMess tunnel.
+UDP works because xray's xudp mux wraps UDP inside the VMess tunnel.
+
+---
+
+## troubleshooting
+
+**getting 404 on server:**
+- check xray is running: `curl http://127.0.0.1:10000/mhr`
+- check `XRAY_PATH` env var matches the path in `xray_server.json` (both should be `/mhr`)
+- check the health endpoint: `curl http://localhost:8080/health`
+
+**getting 403 on server:**
+- `auth_key` in `config.json` doesn't match `MHR_SECRET` on VPS and `SECRET` in `Code.gs`
+- all three must be the same value
+
+**getting 502 on server:**
+- xray is not running — go back to step 2
+
+**can't connect at all from Iran:**
+- make sure you're running `client/proxy.py` — this handles the domain fronting
+- do NOT connect to the VPS directly; the client must go through domain fronting first
+
+**myenv / virtualenv:**
+- perfectly fine to run `server.py` inside a virtualenv
+- just make sure the env vars are set before running
 
 ---
 
@@ -186,16 +263,16 @@ UDP works because xray's xudp mux wraps UDP datagrams inside the VMess tunnel.
 ```
 mhr-ggate/
 ├── client/
-│   ├── fronting.py          # Domain fronting logic (the brain)
-│   ├── proxy.py             # Local SOCKS5 proxy
-│   └── config.example.json  # ← Configuration template
+│   ├── fronting.py          # domain fronting brain (TLS SNI swap)
+│   └── proxy.py             # local SOCKS5 proxy — run this on your device
 ├── gas/
 │   └── Code.gs              # paste into Google Apps Script
 ├── server/
-│   ├── server.py            # relay server, run on VPS
-│   └── xray_server.json     # xray config for VPS
+│   ├── server.py            # relay bridge — run this on your VPS
+│   └── xray_server.json     # xray config — run this on your VPS
 ├── v2ray/
-│   └── generate_config.py   # generates client config + vmess:// link
+│   └── generate_config.py   # generates vmess:// link
+├── config.example.json      # copy to config.json and fill in values
 └── README.md
 ```
 
@@ -203,16 +280,16 @@ mhr-ggate/
 
 ## notes
 
-- GAS free tier gives around 20k URL fetches per day, enough for personal use. if you need more just deploy from a second Google account and split traffic.
-- SplitHTTP doesn't need a WebSocket upgrade handshake so it's harder to fingerprint than ws-based configs.
-- your VPS IP is never directly dialed by the client — only GAS calls it. keep the relay port firewalled and only expose 443 through nginx.
+- GAS free tier: ~20k URL fetches/day. enough for personal use. need more? deploy a second GAS from another Google account.
+- SplitHTTP has no WebSocket upgrade handshake — harder to fingerprint.
+- your VPS IP is never directly dialed by anyone — only GAS calls it. firewall all ports except 443.
 
 ---
 
 ## credits
 
-- [Vuk](https://github.com/Vuks1n) — ideas
-- [mhr-cfw](https://github.com/denuitt1/mhr-cfw) — original GAS → CF Workers idea
+- [mhr-cfw](https://github.com/denuitt1/mhr-cfw) — original GAS → CF Workers + domain fronting idea
+- [masterking32/MasterHttpRelayVPN](https://github.com/masterking32/MasterHttpRelayVPN) — original relay concept
 - [XTLS/Xray-core](https://github.com/XTLS/Xray-core) — the actual tunnel
 
 ---

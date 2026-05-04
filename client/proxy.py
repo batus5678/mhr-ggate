@@ -1,21 +1,16 @@
 """
 mhr-ggate | Local MITM Proxy
-------------------------------
-Sits on localhost, accepts HTTP/HTTPS proxy connections.
-For HTTPS: terminates TLS with a fake cert, reads plain HTTP,
-           forwards through domain fronting → GAS → VPS → internet.
-For HTTP:  forwards directly through domain fronting.
-
-Usage:
-    python proxy.py -c ../config.json
-
-First run generates a CA cert — install it in your browser or you'll get SSL errors.
+Auto-installs CA cert on first run (Windows/Linux/Mac).
+Browser HTTPS traffic → domain fronting → GAS → VPS → internet
+Games → use the vmess:// config in v2rayN/Hiddify instead
 """
 
 import asyncio
 import json
 import logging
+import platform
 import ssl
+import subprocess
 import sys
 import argparse
 import urllib.parse
@@ -25,6 +20,56 @@ from fronting import DomainFrontClient
 
 log = logging.getLogger("Proxy")
 
+
+# ── Auto cert install ──────────────────────────────────────────────────
+
+def install_ca_cert():
+    """Install CA cert into system/browser trust store automatically."""
+    cert_path = str(CA_CERT.resolve())
+    system = platform.system()
+
+    print(f"[*] Installing CA cert: {cert_path}")
+
+    try:
+        if system == "Windows":
+            # certutil is built into Windows — no install needed
+            result = subprocess.run(
+                ["certutil", "-addstore", "-f", "ROOT", cert_path],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                print("[+] CA cert installed into Windows trust store (Chrome/Edge will trust it now)")
+                print("[!] Firefox users: still need to import manually in Firefox settings")
+            else:
+                print(f"[!] certutil failed: {result.stderr.strip()}")
+                print(f"    Manual install: double-click {cert_path} → Install → Trusted Root CAs")
+
+        elif system == "Linux":
+            # Debian/Ubuntu
+            import shutil
+            dest = f"/usr/local/share/ca-certificates/mhr-ggate.crt"
+            shutil.copy(cert_path, dest)
+            subprocess.run(["update-ca-certificates"], check=True)
+            print("[+] CA cert installed system-wide")
+
+        elif system == "Darwin":
+            subprocess.run([
+                "security", "add-trusted-cert", "-d",
+                "-r", "trustRoot",
+                "-k", "/Library/Keychains/System.keychain",
+                cert_path
+            ], check=True)
+            print("[+] CA cert installed into macOS keychain")
+
+        else:
+            print(f"[!] Unknown OS — install manually: {cert_path}")
+
+    except Exception as e:
+        print(f"[!] Auto-install failed: {e}")
+        print(f"    Manual install path: {cert_path}")
+
+
+# ── MITM Proxy ─────────────────────────────────────────────────────────
 
 class MITMProxy:
     def __init__(self, config: dict):
@@ -44,7 +89,6 @@ class MITMProxy:
         return body
 
     async def _relay_https(self, reader, writer, host, port):
-        """MITM: terminate TLS, relay decrypted HTTP through domain fronting."""
         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         await writer.drain()
 
@@ -55,11 +99,9 @@ class MITMProxy:
 
         try:
             ssl_ctx = make_ssl_context(host)
-            loop = asyncio.get_event_loop()
-
+            loop    = asyncio.get_event_loop()
             tls_reader = asyncio.StreamReader()
-            proto = asyncio.StreamReaderProtocol(tls_reader)
-
+            proto      = asyncio.StreamReaderProtocol(tls_reader)
             transport, _ = await loop.create_connection(
                 lambda: proto,
                 sock=raw_sock,
@@ -103,7 +145,7 @@ class MITMProxy:
                 writer.close()
                 return
 
-            line = first_line.decode(errors="replace").strip()
+            line  = first_line.decode(errors="replace").strip()
             parts = line.split()
             if len(parts) < 2:
                 writer.close()
@@ -111,7 +153,6 @@ class MITMProxy:
 
             method, target = parts[0].upper(), parts[1]
 
-            # drain remaining headers
             while True:
                 hdr = await reader.readline()
                 if hdr in (b"\r\n", b"\n", b""):
@@ -124,9 +165,9 @@ class MITMProxy:
                 await self._relay_https(reader, writer, host, port)
             else:
                 parsed = urllib.parse.urlparse(target)
-                host = parsed.hostname or target
-                port = parsed.port or 80
-                path = parsed.path or "/"
+                host   = parsed.hostname or target
+                port   = parsed.port or 80
+                path   = parsed.path or "/"
                 if parsed.query:
                     path += "?" + parsed.query
                 req = f"{method} {path} HTTP/1.1\r\n\r\n".encode()
@@ -146,15 +187,19 @@ class MITMProxy:
 
     async def start(self):
         server = await asyncio.start_server(self.handle, self.host, self.port)
-        log.info("Proxy listening on %s:%d", self.host, self.port)
+        log.info("Proxy on %s:%d — ready", self.host, self.port)
         async with server:
             await server.serve_forever()
 
 
+# ── Entry point ────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-c", "--config", default="../config.json")
-    parser.add_argument("--log-level", default=None)
+    parser.add_argument("-c", "--config",    default="../config.json")
+    parser.add_argument("--log-level",       default=None)
+    parser.add_argument("--skip-cert-install", action="store_true",
+                        help="Don't auto-install CA cert")
     args = parser.parse_args()
 
     try:
@@ -171,21 +216,23 @@ def main():
         datefmt="%H:%M:%S",
     )
 
+    # Generate CA and auto-install on first run
+    ca_existed = CA_CERT.exists()
     ensure_ca()
+    if not ca_existed and not args.skip_cert_install:
+        install_ca_cert()
+    elif not ca_existed:
+        print(f"[!] Install CA cert manually: {CA_CERT.resolve()}")
 
     print("=" * 60)
     print("  mhr-ggate | MITM Proxy")
     print("=" * 60)
-    print(f"  Proxy      : {config.get('listen_host')}:{config.get('listen_port', 8085)}")
+    print(f"  Proxy addr : {config.get('listen_host')}:{config.get('listen_port', 8085)}")
     print(f"  SNI        : {config.get('front_domain')} (what DPI sees)")
-    print(f"  Real host  : script.google.com (inside TLS, hidden)")
+    print(f"  Real host  : script.google.com (hidden inside TLS)")
     print()
-    print(f"  ⚠  Install the CA cert or HTTPS won't work:")
-    print(f"     {CA_CERT.resolve()}")
-    print(f"     Chrome/Edge : Settings → Privacy → Manage Certs")
-    print(f"                   → Trusted Root CAs → Import")
-    print(f"     Firefox     : Settings → Privacy → View Certs")
-    print(f"                   → Authorities → Import")
+    print(f"  Set browser proxy → HTTP  127.0.0.1:{config.get('listen_port', 8085)}")
+    print(f"  For games           → use vmess:// config in v2rayN or Hiddify")
     print("=" * 60)
 
     try:

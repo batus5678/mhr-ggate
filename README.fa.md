@@ -59,6 +59,14 @@
 
 ## راه‌اندازی
 
+### مرحله 0 — کلون repo
+
+**تو سرور**
+```cmd
+git clone https://github.com/Vuks1n/mhr-ggate
+cd mhr-ggate
+```
+
 ### مرحله ۱ — VPS: نصب xray-core
 
 ```bash

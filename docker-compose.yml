@@ -1,0 +1,54 @@
+version: "3.9"
+
+# mhr-ggate | Docker Compose — VPS deployment
+# =============================================
+# Usage:
+#   export MHR_SECRET=your_secret
+#   export MHR_DOMAIN=yourdomain.com   # optional; enables nginx+TLS
+#   docker compose up -d
+#
+# Services:
+#   xray    — VMess inbound (xhttp, packet-up)  on 127.0.0.1:10000
+#   server  — Python relay bridge                on 0.0.0.0:8080
+#   nginx   — TLS termination + reverse proxy    on 0.0.0.0:443
+
+services:
+
+  xray:
+    image: teddysun/xray:latest
+    container_name: mhr-xray
+    restart: unless-stopped
+    volumes:
+      - ./server/xray_server.json:/etc/xray/config.json:ro
+    network_mode: "service:server"   # share network with server so localhost works
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: mhr-server
+    restart: unless-stopped
+    environment:
+      MHR_SECRET: "${MHR_SECRET:-change_me}"
+      XRAY_HOST:  "127.0.0.1"
+      XRAY_PORT:  "10000"
+      XRAY_PATH:  "/mhr"
+      PORT:       "8080"
+    ports:
+      - "8080:8080"
+
+  nginx:
+    image: nginx:alpine
+    container_name: mhr-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./server/nginx.conf:/etc/nginx/conf.d/mhr-ggate.conf:ro
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - server
+
+volumes:
+  letsencrypt:

@@ -1,20 +1,45 @@
 {
   "log": { "loglevel": "warning" },
-  "inbounds": [{
-    "tag": "splithttp-in",
-    "port": 10000,
-    "listen": "127.0.0.1",
-    "protocol": "vmess",
-    "settings": {
-      "clients": [{
-        "id": "4d236123-ef34-439a-b654-fc58927d93b3",
-        "alterId": 0
-      }]
-    },
-    "streamSettings": {
-      "network": "splithttp",
-      "splithttpSettings": { "path": "/mhr" }
+  "inbounds": [
+    {
+      "tag": "xhttp-in",
+      "port": 10000,
+      "listen": "127.0.0.1",
+      "protocol": "vmess",
+      "settings": {
+        "clients": [
+          {
+            "id": "YOUR-UUID-HERE",
+            "alterId": 0
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/mhr",
+          "mode": "packet-up"
+        }
+      }
     }
-  }],
-  "outbounds": [{ "protocol": "freedom" }]
+  ],
+  "outbounds": [
+    {
+      "tag": "freedom",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "blackhole",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "ip": ["geoip:private"],
+        "outboundTag": "blackhole"
+      }
+    ]
+  }
 }

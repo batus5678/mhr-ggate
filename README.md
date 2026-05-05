@@ -65,6 +65,14 @@ your device
 
 ## Setup
 
+### step 0 — clone the repo
+
+**on your VPS**
+```cmd
+git clone https://github.com/Vuks1n/mhr-ggate
+cd mhr-ggate
+```
+
 ### Step 1 — VPS: install xray-core
 
 SSH into your VPS and run the official installer:

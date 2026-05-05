@@ -1,0 +1,12 @@
+{
+  "google_ip": "216.239.38.120",
+  "front_domain": "www.google.com",
+  "script_id": "AKfycbxcuqr-W2Z0YFfStCVsukHEVVsp8znVe4rassLg7ObVJ5gg08aj27pxAs7yXGlNgA2V",
+  "auth_key": "ok",
+  "listen_host": "127.0.0.1",
+  "socks5_port": 1080,
+  "listen_port": 8085,
+  "verify_ssl": true,
+  "timeout": 30,
+  "log_level": "INFO"
+}

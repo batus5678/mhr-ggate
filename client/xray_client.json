@@ -1,0 +1,99 @@
+// mhr-ggate | Local xray client config
+// ======================================
+// Use this with xray-core on your OWN device.
+// It creates a SOCKS5 proxy on port 1080 that routes traffic through:
+//   local xray → client_relay.py (127.0.0.1:10002) → domain fronting → GAS → VPS xray → internet
+//
+// Prerequisites:
+//   1. client_relay.py is running:  python3 client/client_relay.py -c config.json
+//   2. VPS xray is running with:    xray run -config server/xray_server.json
+//   3. GAS is deployed (Code.gs)    with correct VPS_URL and SECRET
+//
+// How to run:
+//   xray run -config client/xray_client.json
+//
+// Then set browser / app proxy to SOCKS5 127.0.0.1:1080
+{
+  "log": { "loglevel": "warning" },
+
+  "inbounds": [
+    {
+      "tag": "socks5-in",
+      "port": 1080,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      }
+    },
+    {
+      "tag": "http-in",
+      "port": 8118,
+      "listen": "127.0.0.1",
+      "protocol": "http",
+      "settings": {}
+    }
+  ],
+
+  "outbounds": [
+    {
+      "tag": "mhr-ggate",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "127.0.0.1",
+            "port": 10002,
+            "users": [
+              {
+                "id": "YOUR-UUID-HERE",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/mhr",
+          "mode": "packet-up"
+        }
+      },
+      "mux": {
+        "enabled": true,
+        "concurrency": 8,
+        "xudpConcurrency": 16,
+        "xudpProxyUDP443": "allow"
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {}
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole",
+      "settings": {}
+    }
+  ],
+
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "ip": ["geoip:private"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "network": "tcp,udp",
+        "outboundTag": "mhr-ggate"
+      }
+    ]
+  }
+}

